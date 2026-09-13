@@ -1,6 +1,16 @@
-# 開発方針＆開発環境ルール(rtypescript)
+# 開発方針＆開発環境ルール(RS-TypeScript)
 
-作業ドライブは`F:\open-runo`。この節は[`open-raid-z`](https://github.com/aon-co-jp/open-raid-z)の`CLAUDE.md`を正本とし、各プロジェクトへコピーして同期する方針に準じる。
+作業ドライブは`F:\runo`。この節は[`open-raid-z`](https://github.com/aon-co-jp/open-raid-z)の`CLAUDE.md`を正本とし、各プロジェクトへコピーして同期する方針に準じる。
+
+## リポジトリ改称(2026-09-13)
+
+`RTypeScript`→`RS-TypeScript`へGitHub上でrename済み(crate名も
+`rtypescript`→`rs-typescript`)。`aruaru.pro`(コンコナラ型スキル
+マーケットプレイス+求人サイト統合の新規プロジェクト)向けの
+フロント基盤整備に合わせた、`RFrontEnd`傘下プロジェクトのネーミング
+統一(`RJSON`→`RS-JSON`統合・`RBootstrap`→`RS-BootStrap`・
+`RS-JavaScript`新設)の一環。以下の記述内の`RTypeScript`表記は
+改称前の履歴として残す。
 
 ## このプロジェクトの構想
 
