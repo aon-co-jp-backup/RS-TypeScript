@@ -27,6 +27,7 @@ use crate::enums::strip_enums;
 use crate::expressions::strip_expression_type_syntax;
 use crate::generics::strip_generics;
 use crate::interfaces::strip_interfaces_and_type_aliases;
+use crate::statements::strip_statement_level;
 use crate::token::{CollectingSink, Token};
 use crate::tokenizer::tokenize;
 
@@ -149,6 +150,45 @@ pub(crate) fn find_type_end(tokens: &[Token], start: usize, stops: &[&str]) -> u
     i
 }
 
+
+/// 直前の `}`/`]` が、宣言直後(`let`/`const`/`var`の次)から始まる分割代入パターンを閉じているか。
+/// (`let x = cond ? {a:1} : 2` の三項演算子の `:` を型注釈と誤認しないため、
+/// 対応する開き括弧の直前が宣言キーワードか `,` であることを確かめる。)
+fn prev_closes_declarator_pattern(tokens: &[Token], sig_history: &[usize]) -> bool {
+    let close_idx = match sig_history.last() {
+        Some(&i) => i,
+        None => return false,
+    };
+    let (open_ch, close_ch) = match &tokens[close_idx] {
+        Token::Punctuator(p) if p == "}" => ("{", "}"),
+        Token::Punctuator(p) if p == "]" => ("[", "]"),
+        _ => return false,
+    };
+    // 後ろから対応する開き括弧を探す
+    let mut depth = 0i32;
+    let mut j = close_idx as isize;
+    while j >= 0 {
+        if let Token::Punctuator(p) = &tokens[j as usize] {
+            if p == close_ch {
+                depth += 1;
+            } else if p == open_ch {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        j -= 1;
+    }
+    if j < 0 {
+        return false;
+    }
+    let before = (0..j as usize).rev().find(|&k| is_significant(&tokens[k]));
+    matches!(before.map(|k| &tokens[k]),
+        Some(Token::Identifier(kw)) if matches!(kw.as_str(), "let" | "const" | "var"))
+        || matches!(before.map(|k| &tokens[k]), Some(Token::Punctuator(p)) if p == ",")
+}
+
 /// ソース文字列をトークナイズしたうえで型注釈を除去する。
 ///
 /// パイプライン(各段はトークン列→トークン列の変換、最終段のみ
@@ -169,6 +209,7 @@ pub fn transpile(source: &str) -> String {
     let mut sink = CollectingSink::default();
     tokenize(source, &mut sink);
     let tokens = sink.tokens;
+    let tokens = strip_statement_level(&tokens);
     let tokens = strip_interfaces_and_type_aliases(&tokens);
     let tokens = strip_enums(&tokens);
     let tokens = strip_class_syntax(&tokens);
@@ -186,6 +227,10 @@ pub fn strip_type_annotations(tokens: &[Token]) -> String {
     // インデックス列。直近2件を見れば「let/const/varの直後」
     // 「(または,の直後」といった文脈判定ができる。
     let mut sig_history: Vec<usize> = Vec::new();
+    // `(`/`[`/`{` すべての深さ。複数宣言子(`let a: T = 1, b: U = 2;`)と分割代入の
+    // 型注釈(`let {a}: T = o;`)の判定に使う。宣言ごとに (宣言の深さ, 初期化子を見たか)。
+    let mut depth_all: i32 = 0;
+    let mut decl_stack: Vec<(i32, bool)> = Vec::new();
     let mut i = 0usize;
 
     while i < tokens.len() {
@@ -197,6 +242,47 @@ pub fn strip_type_annotations(tokens: &[Token]) -> String {
             out.push_str(token_text(tok));
             i += 1;
             continue;
+        }
+
+        if let Token::Identifier(kw) = tok {
+            if matches!(kw.as_str(), "let" | "const" | "var") {
+                let after_dot = sig_history.last().map(|&ix| matches!(&tokens[ix], Token::Punctuator(p) if p == ".")).unwrap_or(false);
+                if !after_dot {
+                    decl_stack.push((depth_all, false));
+                }
+            }
+        }
+
+        if let Token::Punctuator(p) = tok {
+            match p.as_str() {
+                "(" | "[" | "{" => depth_all += 1,
+                ")" | "]" | "}" => {
+                    depth_all -= 1;
+                    while matches!(decl_stack.last(), Some(&(d, _)) if d > depth_all) {
+                        decl_stack.pop();
+                    }
+                }
+                ";" => {
+                    while matches!(decl_stack.last(), Some(&(d, _)) if d >= depth_all) {
+                        decl_stack.pop();
+                    }
+                }
+                "=" => {
+                    if let Some(top) = decl_stack.last_mut() {
+                        if top.0 == depth_all {
+                            top.1 = true;
+                        }
+                    }
+                }
+                "," => {
+                    if let Some(top) = decl_stack.last_mut() {
+                        if top.0 == depth_all {
+                            top.1 = false;
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
         if let Token::Punctuator(p) = tok {
@@ -227,11 +313,25 @@ pub fn strip_type_annotations(tokens: &[Token]) -> String {
                 let prev = sig_history.last().map(|&idx| &tokens[idx]);
                 let prev2 = if sig_history.len() >= 2 { Some(&tokens[sig_history[sig_history.len() - 2]]) } else { None };
 
+                let at_decl_level = matches!(decl_stack.last(), Some(&(d, has_init)) if d == depth_all && !has_init);
                 let is_var_decl = matches!(prev, Some(Token::Identifier(_)))
-                    && matches!(prev2, Some(Token::Identifier(kw)) if matches!(kw.as_str(), "let" | "const" | "var"));
-                let is_param = matches!(prev, Some(Token::Identifier(_)))
+                    && (matches!(prev2, Some(Token::Identifier(kw)) if matches!(kw.as_str(), "let" | "const" | "var"))
+                        // 2つ目以降の宣言子: `let a = 1, b: T = 2`
+                        || (at_decl_level && matches!(prev2, Some(Token::Punctuator(pp)) if pp == ",")))
+                    // 分割代入の後: `let {a}: T = o` / `let [a]: T = o`
+                    || (at_decl_level
+                        && matches!(prev, Some(Token::Punctuator(pp)) if pp == "}" || pp == "]")
+                        && sig_history.len() >= 2
+                        && prev_closes_declarator_pattern(tokens, &sig_history));
+                let prev3 = if sig_history.len() >= 3 { Some(&tokens[sig_history[sig_history.len() - 3]]) } else { None };
+                let is_rest_param = matches!(prev, Some(Token::Identifier(_)))
                     && paren_depth >= 1
-                    && matches!(prev2, Some(Token::Punctuator(pp)) if pp == "(" || pp == ",");
+                    && matches!(prev2, Some(Token::Punctuator(pp)) if pp == "...")
+                    && matches!(prev3, Some(Token::Punctuator(pp)) if pp == "(" || pp == ",");
+                let is_param = (matches!(prev, Some(Token::Identifier(_)))
+                    && paren_depth >= 1
+                    && matches!(prev2, Some(Token::Punctuator(pp)) if pp == "(" || pp == ","))
+                    || is_rest_param;
                 let is_return_type = matches!(prev, Some(Token::Punctuator(pp)) if pp == ")");
 
                 if is_var_decl || is_param {

@@ -203,3 +203,12 @@ DSL+Wasm直接コンパイル、C: swcでASTのみ取り込み+独自インタ�
 - **WASM по-прежнему остаётся технологией для интерфейса.** Изменилось лишь то, что вызываемый им API теперь построен на Connect.
 - Интерфейсы, форма которых задана внешним стандартом (ACME, обратные вызовы OAuth, вебхуки сторонних сервисов, проверки работоспособности, статические файлы, OTLP), остаются обычным HTTP.
 - **Если есть сомнения — выбирайте Connect.**
+
+## 2026-11-19 追記: 文レベル構文・クラス・namespace に対応(ユーザー指示: TypeScript の Rust 版を JavaScript より優先して進める)
+
+- 位置づけ: `RPoem`/`RPoRea` を Rust から使う Web サイト・アプリ開発で、`rhtml5`・`rcss3`・本 crate・`RS-JavaScript`(雛形のみ)を一緒に使う想定。HTML5/CSS3 は極力少なく、tokio と WASM を適材適所で、REST は使わない。
+- 調査(2026-11-19): `rhtml5`(トークナイザのみ 775行)・`rcss3`(パーサー+カスケード 440行)・`RS-JavaScript`(雛形 11行)・本 crate(1.7千行 → 本日 約2.4千行)。TypeScript 側を先に進めた。
+- 追加: `src/statements.rs`(import type / 型だけの指定子 / `declare` / `abstract class` / `namespace` のIIFE展開)、複数宣言子・残余引数・分割代入の型注釈(`transpile.rs`)、`implements`節・`abstract`メンバー・`declare`フィールド・派生クラスのパラメータプロパティを `super()` の後へ(`classes.rs`)、`satisfies` と複雑な `as` の型(`expressions.rs`)。
+- 検証: `cargo test` 全件成功(単体64+統合1)。統合試験は `tests/sample.ts` を変換して Node で実行し出力を照合。
+- 未了: 上記「未対応」のとおり。次の候補: オーバーロード宣言(本体なし)・`this`パラメータ・`namespace A.B`・ソースマップ・Wasm向け出力・`rhtml5`/`rcss3` との連携(SSRで HTML+CSS+TS を1つの管理下に)。
+- 注意: トークン列のヒューリスティック変換で、完全な構文解析ではない。曖昧なものは「素通し」側に倒す。

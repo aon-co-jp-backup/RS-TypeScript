@@ -40,11 +40,67 @@ fn is_value_end(tok: &Token) -> bool {
     }
 }
 
+
+/// `start` から型1つ分(`A`・`A.B`・`A<B, C>`・`A[]`・`{ x: T }`・`[A, B]`・`(A | B)`・`"lit"`・
+/// ユニオン/インターセクション/`keyof`/`typeof` つき)を読み飛ばし、終端(含まない)を返す。
+/// 読めなければ `None`。関数型(`() => T`)は対象外。
+fn skip_type(tokens: &[Token], start: usize) -> Option<usize> {
+    use crate::transpile::{consume_angle_generic, consume_matching_bracket};
+    let mut i = start;
+    loop {
+        // 前置: keyof / typeof / readonly / unique / `|` `&` の先頭
+        while let Some(Token::Identifier(k)) = tokens.get(i) {
+            if matches!(k.as_str(), "keyof" | "typeof" | "readonly" | "unique") {
+                i = next_sig_index(tokens, i + 1)?;
+            } else {
+                break;
+            }
+        }
+        // 原子
+        let mut end = match tokens.get(i)? {
+            Token::Identifier(_) | Token::StringLiteral(_) | Token::Number(_) => i + 1,
+            Token::Punctuator(p) if p == "{" => consume_matching_bracket(tokens, i, "{", "}")? + 1,
+            Token::Punctuator(p) if p == "[" => consume_matching_bracket(tokens, i, "[", "]")? + 1,
+            Token::Punctuator(p) if p == "(" => consume_matching_bracket(tokens, i, "(", ")")? + 1,
+            _ => return None,
+        };
+        // 後置: `.Name` `<...>` `[]` `[K]`(隣接するときだけ)
+        loop {
+            match tokens.get(end) {
+                Some(Token::Punctuator(p)) if p == "<" => end = consume_angle_generic(tokens, end)? + 1,
+                Some(Token::Punctuator(p)) if p == "[" => end = consume_matching_bracket(tokens, end, "[", "]")? + 1,
+                Some(Token::Punctuator(p)) if p == "." => match tokens.get(end + 1) {
+                    Some(Token::Identifier(_)) => end += 2,
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        // 続き: `|` / `&`(空白をまたいでよい)
+        match next_sig_index(tokens, end) {
+            Some(n) if matches!(&tokens[n], Token::Punctuator(p) if p == "|" || p == "&") => {
+                i = next_sig_index(tokens, n + 1)?;
+            }
+            _ => return Some(end),
+        }
+    }
+}
+
 pub(crate) fn strip_expression_type_syntax(tokens: &[Token]) -> Vec<Token> {
     let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut i = 0;
+    // `import { a as b }` / `export { a as b }` の波括弧の中では `as` はリネームでありキャストではない。
+    let mut module_brace = false;
     while i < tokens.len() {
         let tok = &tokens[i];
+        if let Token::Punctuator(p) = tok {
+            if p == "{" {
+                module_brace = matches!(out.iter().rev().find(|t| is_significant(t)),
+                    Some(Token::Identifier(k)) if k == "import" || k == "export");
+            } else if p == "}" {
+                module_brace = false;
+            }
+        }
 
         // 後置`!`(非nullアサーション): 直前に出力済みの意味トークンが
         // 値の終端であれば、この`!`だけ読み飛ばす(出力しない)。
@@ -63,36 +119,21 @@ pub(crate) fn strip_expression_type_syntax(tokens: &[Token]) -> Vec<Token> {
         // 場合のみキャストとして扱う(`as`は予約語ではないため、変数名
         // として使われるケース—`const as = 1;`—との区別が必要)。
         if let Token::Identifier(s) = tok {
-            if s == "as" {
+            if (s == "as" || s == "satisfies") && !module_brace {
+                // `as`/`satisfies` の直前は値の終端(`}` はオブジェクト/関数リテラルの終端として許す。
+                // `as` は文頭に来られないので、ブロックの `}` と混同する心配がない)
                 let prev_is_value_end = out
                     .iter()
                     .rev()
                     .find(|t| is_significant(t))
-                    .map(is_value_end)
+                    .map(|t| is_value_end(t) || matches!(t, Token::Punctuator(p) if p == "}"))
                     .unwrap_or(false);
                 if prev_is_value_end {
                     if let Some(next_sig) = next_sig_index(tokens, i + 1) {
-                        // `as`の直後が型名らしい識別子(`const`のような
-                        // アサーション`as const`も含め、識別子1つで
-                        // 十分実用的にカバーできる)であれば、`as`から
-                        // その型注釈の終わりまでを丸ごと読み飛ばす。
-                        if matches!(&tokens[next_sig], Token::Identifier(_)) {
-                            let mut end = next_sig + 1;
-                            // 型が配列(`as Type[]`)・ユニオン
-                            // (`as A | B`)の場合も、後続の`[`/`]`/`|`/
-                            // 型名トークン列である間は取り込む。
-                            loop {
-                                let Some(sig) = next_sig_index(tokens, end) else { break };
-                                let is_array_or_union = match &tokens[sig] {
-                                    Token::Punctuator(p) => matches!(p.as_str(), "[" | "]" | "|" | "&" | "."),
-                                    Token::Identifier(_) => true,
-                                    _ => false,
-                                };
-                                if is_array_or_union && sig == end {
-                                    end = sig + 1;
-                                } else {
-                                    break;
-                                }
+                        if let Some(end) = skip_type(tokens, next_sig) {
+                            // `x as T;` が `x ;` にならないよう、`as` の前の同じ行の空白も落とす
+                            while matches!(out.last(), Some(Token::Whitespace(w)) if !w.contains('\n')) {
+                                out.pop();
                             }
                             i = end;
                             continue;
@@ -146,12 +187,12 @@ mod tests {
 
     #[test]
     fn strips_as_type_cast() {
-        assert_eq!(strip_and_render("const x = foo as Bar;"), "const x = foo ;");
+        assert_eq!(strip_and_render("const x = foo as Bar;"), "const x = foo;");
     }
 
     #[test]
     fn strips_as_const_assertion() {
-        assert_eq!(strip_and_render("const x = [1, 2] as const;"), "const x = [1, 2] ;");
+        assert_eq!(strip_and_render("const x = [1, 2] as const;"), "const x = [1, 2];");
     }
 
     #[test]
@@ -167,5 +208,24 @@ mod tests {
     #[test]
     fn leaves_optional_chaining_call_untouched() {
         assert_eq!(strip_and_render("foo?.bar?.();"), "foo?.bar?.();");
+    }
+
+    #[test]
+    fn strips_satisfies_and_complex_as_types() {
+        use crate::transpile::transpile;
+        assert_eq!(transpile("const o = { a: 1 } satisfies Rec;"), "const o = { a: 1 };");
+        assert_eq!(transpile("const o = x satisfies Record<string, number>;"), "const o = x;");
+        assert_eq!(transpile("const o = x as Array<number>;"), "const o = x;");
+        assert_eq!(transpile("const o = x as { a: number };"), "const o = x;");
+        assert_eq!(transpile("const o = x as A | B;"), "const o = x;");
+        assert_eq!(transpile("const o = x as const;"), "const o = x;");
+        assert_eq!(transpile("const o = f(x as string, y);"), "const o = f(x, y);");
+    }
+
+    #[test]
+    fn as_in_import_and_export_braces_is_a_rename_not_a_cast() {
+        use crate::transpile::transpile;
+        assert_eq!(transpile("import { a as b } from 'x';"), "import { a as b } from 'x';");
+        assert_eq!(transpile("export { a as b };"), "export { a as b };");
     }
 }

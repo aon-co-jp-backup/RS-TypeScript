@@ -13,16 +13,41 @@ let js = transpile("function add(a: number, b: number): number { return a + b; }
 assert_eq!(js, "function add(a, b) { return a + b; }");
 ```
 
-## 対応範囲(第一段)
+## 位置づけ(2026-11-19)
 
-- 変数宣言の型注釈(`let x: number = 1;` → `let x = 1;`)
-- 関数パラメータの型注釈
-- 関数の戻り値型注釈(ブロック本体・アロー関数どちらも)
-- 配列型・関数型など、括弧のネストを伴う型注釈
+`RPoem` / `RPoRea` と一緒に、**Rust だけで Web サイト・Web アプリ・アプリを作る**ための部品の1つです。
+組み合わせて使う仲間: [`rhtml5`](https://github.com/aon-co-jp/rhtml5)(HTML5)・[`rcss3`](https://github.com/aon-co-jp/rcss3)(CSS3)・
+[`RS-JavaScript`](https://github.com/aon-co-jp/RS-JavaScript)(JS実行エンジン、雛形)。方針は「HTML5/CSS3 の使用量は極力少なく、
+tokio や WASM を適材適所で使い、REST は使わない(Connect/gRPC)」。この crate は TypeScript を JS にする側(型を除く)を受け持ちます。
 
-## 未対応(次段階)
+## 対応範囲
 
-`interface`/`type`宣言、ジェネリクス制約、複数変数宣言子の2つ目以降、Wasmへの直接コンパイル。
+型の除去(実行時に存在しない構文を取り除く):
+- 変数・関数パラメータ・戻り値の型注釈、オプショナル`?`、残余引数 `...rest: T[]`、複数宣言子(`let a: T = 1, b: U = 2;`)、分割代入の型注釈
+- `interface` / `type` 宣言、ジェネリクス(`<T extends U>`・呼び出し側 `f<T>()`)
+- `x as T` / `x satisfies T` / 非null `x!`(`import { a as b }` のリネームは別扱い)
+- `import type` / `export type { }` / `import { type A, B }`
+- `declare ...`(const/function/class/module/namespace/global/enum)
+- クラス: 可視性・`readonly`・`abstract`(クラス/メンバー)・`declare`フィールド・`implements`節・フィールドの型/`?`/`!`
+実行時の挙動を持つ構文の展開:
+- コンストラクタのパラメータプロパティ → `this.x = x;`(`extends` するクラスでは `super(...)` の**後**に置く)
+- `enum` / `const enum` → IIFE(tsc 互換、数値は逆引き付き)
+- `namespace N { }` → IIFE(`export` は `N.x = x;`、型だけなら何も出さない)
+
+実測: `tests/sample.ts`(名前空間・クラス継承・enum・複数宣言子など)を変換し、**Node で実際に実行して期待どおりの出力**を確認(`cargo test`、Node が無い環境では実行確認だけ省略)。
+
+## 未対応
+
+型チェック(型エラーの検出)、`<T>x` 形式の型アサーション(`.tsx`と区別できないため意図的に非対応)、デコレーター(そのまま素通し)、
+`namespace A.B`・入れ子の `export namespace`、`this` パラメータ、オーバーロード宣言(本体なし)、Wasmへの直接コンパイル。
+
+## Overview (English)
+
+Part of the Rust-only web stack used with `RPoem` / `RPoRea`, together with `rhtml5` (HTML5), `rcss3` (CSS3) and `RS-JavaScript`. This crate strips
+TypeScript-only syntax and expands the constructs that exist at run time (parameter properties, `enum`, `namespace`) so the output is plain JavaScript.
+It is a heuristic token transformer, not a type checker. Supported: annotations, `interface`/`type`, generics, `as`/`satisfies`/`!`, `import type`,
+`declare`, `abstract`, `implements`, multi-declarator `let`, rest parameters. Verified by transpiling `tests/sample.ts` and running the result under Node.
+Not supported: type checking, `<T>x` assertions, decorators (passed through), nested `namespace A.B`, `this` parameters, overload signatures.
 
 ## ビルド・テスト
 
